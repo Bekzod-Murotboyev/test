@@ -1,0 +1,148 @@
+create or replace function change_count_of_order_parts(i_order_id bigint,
+                                                       i_part_id bigint,
+                                                       amount integer)
+    returns bigint
+    language plpgsql as
+$$
+declare
+    v_count integer;
+    v_sp    service_part;
+begin
+    select *
+    into v_sp
+    from service_part sp
+    where sp.
+              services_id =
+          (select services_id
+           from users u
+           where u.id =
+                 (select user_id from orders o where o.id = i_order_id))
+      and sp.part_id = i_part_id;
+
+    if v_sp.left_count - amount < 0 then
+        return -2;
+    else
+        update service_part
+        set left_count=left_count - amount,
+            used_count=used_count + amount
+        where id = v_sp.id;
+    end if;
+
+    perform * from order_part where order_id = i_order_id and part_id = i_part_id;
+    if (FOUND) then
+        update order_part
+        set count = count + amount
+        where order_id = i_order_id
+          and part_id = i_part_id
+        returning count into v_count;
+    else
+        insert into order_part (order_id, part_id, count, active)
+        values (i_order_id, i_part_id, amount, true)
+        returning count into v_count;
+    end if;
+    if (v_count <= 0) then
+        delete from order_part where order_id = i_order_id and part_id = i_part_id and count <= 0;
+    end if;
+
+    return v_count;
+end;
+$$;
+
+create or replace function change_count_of_service_parts(i_services_id bigint,
+                                                         i_part_id bigint,
+                                                         amount integer)
+    returns bigint
+    language plpgsql as
+$$
+declare
+    v_count integer;
+begin
+    perform count from service_part where services_id = i_services_id and part_id = i_part_id;
+    if (FOUND) then
+        update service_part
+        set count = count + amount
+        where services_id = i_services_id
+          and part_id = i_part_id
+        returning count into v_count;
+    else
+        insert into service_part (services_id, part_id, left_count, used_count, count, active)
+        values (i_services_id, i_part_id, 0, 0, amount, true)
+        returning count into v_count;
+    end if;
+    if (v_count <= 0) then
+        delete
+        from service_part
+        where services_id = i_services_id
+          and part_id = i_part_id
+          and count <= 0
+          and left_count = 0
+          and used_count = 0;
+        if (v_count <= 0) then
+            delete
+            from service_part
+            where services_id = i_services_id
+              and part_id = i_part_id
+              and count <= 0
+              and left_count <= 0
+              and used_count <= 0;
+            if (v_count < 0) then
+                v_count = -1;
+            end if;
+        end if;
+    end if;
+    return v_count;
+end;
+$$;
+
+
+
+create or replace procedure complete_adding_part_to_service()
+    language plpgsql as
+$$
+begin
+    update services s
+    set loan=loan + (select sum(price * count)
+                     from service_part sp
+                              inner join part p on sp.part_id = p.id
+                     where services_id = s.id
+                       and sp.count > 0)
+    where s.id = (select distinct services_id from service_part where count > 0);
+
+    update service_part
+    set left_count=count + left_count,
+        count=0
+    where count > 0;
+end;
+$$;
+
+
+create or replace procedure lose_count(
+    i_order_id bigint,
+    i_chat_id varchar
+)
+    language plpgsql as
+$$
+declare
+    item record;
+begin
+
+    for item in select * from order_part where order_id = i_order_id
+        loop
+            update service_part sp
+            set left_count=left_count + item.count,
+                used_count=used_count - item.count
+            where sp.part_id = item.part_id
+              and sp.services_id =
+                  (select services_id from users u where u.chat_id = i_chat_id);
+        end loop;
+
+
+    delete from order_part where order_id = i_order_id and not (select active from orders where id = i_order_id);
+
+
+end;
+$$;
+
+
+
+
